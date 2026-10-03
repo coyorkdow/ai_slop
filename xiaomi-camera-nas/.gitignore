@@ -1,0 +1,20 @@
+# Camera recordings and generated videos
+*.mp4
+
+# Runtime output of .remote-access: logs, compression cache, manifests, locks, temp files
+/.remote-access/var/
+
+# Safety net for stray logs (including rotated backups such as downloads.jsonl.1)
+*.log
+*.log.[0-9]*
+*.jsonl
+*.jsonl.[0-9]*
+
+__pycache__/
+.DS_Store
+.claude/
+
+# Local backups and scratch copies
+*-backup.*
+*.bak
+*.orig
