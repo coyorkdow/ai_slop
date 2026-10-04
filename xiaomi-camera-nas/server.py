@@ -10,11 +10,12 @@ import re
 import secrets
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 import playback
+import motion
 
 ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = Path(__file__).resolve().parent / 'var' / 'log'
@@ -39,6 +40,10 @@ def recording_label(name):
     start_text = start.strftime('%Y-%m-%d %H:%M:%S')
     end_text = end.strftime('%H:%M:%S' if start.date() == end.date() else '%Y-%m-%d %H:%M:%S')
     return '{} ～ {}'.format(start_text, end_text)
+
+
+def event_label(offset):
+    return '录像内 ' + str(timedelta(seconds=int(offset)))
 
 
 def configure_download_log():
@@ -121,7 +126,11 @@ class Handler(BaseHTTPRequestHandler):
                 '<meta name="viewport" content="width=device-width,initial-scale=1">'
                 '<title>小米录像下载</title><style>body{font:18px system-ui;'
                 'max-width:900px;margin:40px auto;padding:0 20px}li{margin:20px 0;'
-                'overflow-wrap:anywhere}</style>' + content + '</html>').encode()
+                'overflow-wrap:anywhere}.events-panel{margin-top:8px}'
+                '.events-panel summary{cursor:pointer;font-size:15px}'
+                '.events{display:flex;flex-wrap:wrap;gap:12px;'
+                'padding:8px 0}.event{font-size:14px;width:160px}.event img{width:160px;'
+                'height:90px;object-fit:cover;display:block}</style>' + content + '</html>').encode()
         self.send_response(status)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', str(len(page)))
@@ -170,6 +179,24 @@ class Handler(BaseHTTPRequestHandler):
                                       'style="display:inline"><button type="submit">重新压缩</button></form>'
                                       .format(href, ACTION_TOKEN))
                     extra += '</small>'
+                    if p.suffix.lower() == '.mp4':
+                        video = playback.prepared(p)
+                        if video:
+                            index = motion.read_index(video)
+                            if index is None:
+                                extra += '<br><small>画面变化分析中</small>'
+                            elif index['state'] == 'failed':
+                                extra += '<br><small>画面变化分析失败；录像仍可下载</small>'
+                            elif not index['events']:
+                                extra += '<br><small>未检测到明显活动</small>'
+                            else:
+                                cards = []
+                                for number, event in enumerate(index['events']):
+                                    label = html.escape(event_label(event['offset_seconds']))
+                                    cards.append('<span class="event"><img loading="lazy" src="{}?event_thumb={}" alt="">{}</span>'
+                                                 .format(href, number, label))
+                                extra += ('<details class="events-panel"><summary>检测到 {} 处画面变化 · 展开关键帧</summary>'
+                                          '<div class="events">{}</div></details>').format(len(cards), ''.join(cards))
                 items.append('<li><a href="{}">{}</a>{}</li>'.format(href, name, extra))
             self.page('<h1>小米录像下载</h1><p>点击录像下载压缩版，再用本地播放器打开。</p>'
                       '<a href="../">返回上级</a><ul>' + ''.join(items) + '</ul>', body)
@@ -177,7 +204,35 @@ class Handler(BaseHTTPRequestHandler):
         if path.suffix.lower() not in VIDEO:
             return self.send_error(404)
         source = path
-        original = parse_qs(url.query).get('original') == ['1']
+        params = parse_qs(url.query)
+        original = params.get('original') == ['1']
+        if 'event_thumb' in params:
+            if original or source.suffix.lower() != '.mp4':
+                return self.send_error(404)
+            video = playback.prepared(source)
+            index = motion.read_index(video) if video else None
+            try:
+                number = int(params['event_thumb'][0])
+                event = index['events'][number] if number >= 0 and index and index['state'] == 'ready' else None
+            except (ValueError, IndexError, TypeError, KeyError):
+                event = None
+            if event is None:
+                return self.send_error(404)
+            thumb = motion.thumbnail_path(video, number)
+            if event.get('thumbnail') != thumb.name:
+                return self.send_error(404)
+            try:
+                data = thumb.read_bytes()
+            except OSError:
+                return self.send_error(404)
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/png')
+            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            if body:
+                self.wfile.write(data)
+            return
         if not path.is_file() and (original or path.suffix.lower() != '.mp4' or not playback.prepared(source)):
             return self.send_error(404)
         name = source.name

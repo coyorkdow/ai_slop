@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import uuid
+import motion
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE = Path(__file__).resolve().parent / 'var' / 'playback'
@@ -379,6 +380,9 @@ def prepare(source, before):
             if path != target and not path.name.endswith(('.part.mp4', '.snapshot.mp4')):
                 try:
                     path.unlink()
+                    motion.index_path(path).unlink(missing_ok=True)
+                    for thumb in CACHE.glob(path.stem + '.event-*.png'):
+                        thumb.unlink()
                 except FileNotFoundError:
                     pass
     finally:
@@ -471,3 +475,27 @@ def start():
         logging.error('FFmpeg not found: %s', FFMPEG)
         return
     threading.Thread(target=worker, daemon=True, name='compression-watcher').start()
+    threading.Thread(target=motion_worker, daemon=True, name='motion-indexer').start()
+
+
+def motion_worker():
+    """Index current published copies, including copies made before this feature."""
+    while True:
+        try:
+            for manifest in CACHE.glob('*.json'):
+                try:
+                    record = json.loads(manifest.read_text())
+                    relative = record.get('source_relative')
+                    if not isinstance(relative, str):
+                        continue
+                    source = ROOT / relative
+                    if cache_paths(source)[1] != manifest:
+                        continue
+                    video = prepared(source)
+                    if video and not motion.read_index(video):
+                        motion.build(video, FFMPEG)
+                except (OSError, ValueError, TypeError):
+                    logging.exception('Cannot inspect motion index for %s', manifest.name)
+        except OSError:
+            logging.exception('Cannot scan playback cache for motion indexes')
+        time.sleep(POLL_SECONDS)

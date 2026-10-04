@@ -13,6 +13,8 @@ from types import SimpleNamespace
 
 import playback as p
 import server
+import motion
+import numpy as np
 
 
 class QuietTests(unittest.TestCase):
@@ -248,6 +250,42 @@ class CacheTests(unittest.TestCase):
         self.assertIn(name.encode(), page)
         self.assertIn(('href="/' + name + '"').encode(), page)
 
+    def test_directory_lists_motion_and_serves_only_indexed_thumbnail(self):
+        video = self.publish()
+        thumb = motion.thumbnail_path(video, 0)
+        thumb.write_bytes(b'png bytes')
+        motion.index_path(video).write_text(json.dumps({
+            'recipe': motion.RECIPE, 'video': video.name, 'state': 'ready',
+            'events': [{'offset_seconds': 12.5, 'thumbnail': thumb.name}]}))
+        status, _, page = self.request('/')
+        self.assertEqual(status, 200)
+        self.assertIn('录像内 0:00:12'.encode(), page)
+        self.assertIn('<details class="events-panel"><summary>检测到 1 处画面变化 · 展开关键帧</summary>'.encode(), page)
+        self.assertIn(b'</div></details></li>', page)
+        self.assertNotIn(b'<details class="events-panel" open', page)
+        self.assertNotIn('约 '.encode(), page)
+        self.assertEqual(server.event_label(3661.9), '录像内 1:01:01')
+        self.assertIn(b'event_thumb=0', page)
+        self.assertEqual(self.request('/recording.mp4?event_thumb=0')[2], b'png bytes')
+        self.assertEqual(self.request('/recording.mp4?event_thumb=1')[0], 404)
+        self.assertEqual(self.request('/recording.mp4?event_thumb=-1')[0], 404)
+
+    def test_failed_motion_index_does_not_block_download(self):
+        video = self.publish()
+        motion.index_path(video).write_text(json.dumps({
+            'recipe': motion.RECIPE, 'video': video.name, 'state': 'failed', 'events': []}))
+        self.assertIn('画面变化分析失败'.encode(), self.request('/')[2])
+        self.assertEqual(self.request('/recording.mp4')[2], video.read_bytes())
+
+    def test_recompression_removes_superseded_motion_index(self):
+        old = self.publish()
+        motion.index_path(old).write_text('{}')
+        motion.thumbnail_path(old, 0).write_bytes(b'old thumbnail')
+        self.publish()
+        self.assertFalse(old.exists())
+        self.assertFalse(motion.index_path(old).exists())
+        self.assertFalse(motion.thumbnail_path(old, 0).exists())
+
     def test_recording_label_falls_back_for_invalid_or_other_names(self):
         self.assertEqual(server.recording_label('00_20261004062452_20261004071702.mp4'),
                          '2026-10-04 06:24:52 ～ 07:17:02')
@@ -416,6 +454,50 @@ class CacheTests(unittest.TestCase):
         finally:
             timer.join()
         self.assertIsNotNone(processes[0].poll())
+
+
+class MotionTests(unittest.TestCase):
+    def test_local_motion_and_uniform_light_change(self):
+        still = np.full((motion.HEIGHT, motion.WIDTH), 60, np.uint8)
+        lit = np.full_like(still, 110)
+        moving = still.copy()
+        moving[40:80, 60:100] = 180
+        self.assertEqual(motion.activity(still, lit), 0)
+        self.assertGreater(motion.activity(still, moving), 100)
+        self.assertEqual(motion.activity(still, still), 0)
+
+    def test_sustained_motion_groups_hits_and_ignores_one_frame(self):
+        still = np.full((motion.HEIGHT, motion.WIDTH), 60, np.uint8)
+        changed = still.copy()
+        changed[40:80, 60:100] = 180
+        frames = [still] * 5 + [changed] * 3 + [still] * 12 + [changed] * 3
+        events = list(motion.detect(frames))
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0][0], 2.5)
+
+    def test_slow_small_object_is_detected_across_two_seconds(self):
+        frames = []
+        for number in range(12):
+            frame = np.full((motion.HEIGHT, motion.WIDTH), 60, np.uint8)
+            frame[75:95, 55 + number * 2:85 + number * 2] = 90
+            frames.append(frame)
+        self.assertEqual([offset for offset, _ in motion.detect(frames)], [2.0])
+
+    def test_build_publishes_thumbnail_and_records_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory) / 'copy.mp4'
+            video.write_bytes(b'video')
+            frame = np.full((motion.HEIGHT, motion.WIDTH), 90, np.uint8)
+            with patch.object(motion, 'decoded_frames', return_value=iter([frame, frame])):
+                with patch.object(motion, 'detect', return_value=iter([(1.5, frame)])):
+                    motion.build(video, 'ffmpeg')
+            self.assertEqual(motion.read_index(video)['events'][0]['offset_seconds'], 1.5)
+            self.assertTrue(motion.thumbnail_path(video, 0).read_bytes().startswith(b'\x89PNG'))
+            motion.index_path(video).unlink()
+            with patch.object(motion, 'decoded_frames', side_effect=ValueError('decode failed')):
+                with patch.object(motion.logging, 'exception'):
+                    motion.build(video, 'ffmpeg')
+            self.assertEqual(motion.read_index(video)['state'], 'failed')
 
 
 if __name__ == '__main__':
