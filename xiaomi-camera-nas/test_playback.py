@@ -69,6 +69,8 @@ class CacheTests(unittest.TestCase):
         self.source.write_bytes(b'a' * 4096)
         self.before = p.signature(self.source)
         p.REJECTED.clear()
+        p.STALE_HINTS.clear()
+        p.FORCE_RECOMPRESS.clear()
         p.STATES.clear()
         p.drain_invalidations(p.QuietWindow())
 
@@ -172,6 +174,127 @@ class CacheTests(unittest.TestCase):
             p.drain_invalidations(q)
             self.assertFalse(q.ready(self.source, self.before, now=899, wall=1e12))
             self.assertTrue(q.ready(self.source, self.before, now=900, wall=1e12))
+
+    def test_change_after_one_hour_keeps_downloadable_copy_with_hint(self):
+        target = self.publish()
+        _, manifest = p.cache_paths(self.source)
+        record = json.loads(manifest.read_text())
+        record['completed_at'] -= p.POST_COMPRESSION_GRACE_SECONDS + 1
+        manifest.write_text(json.dumps(record))
+        self.source.write_bytes(b'b' * 4096)
+        self.assertEqual(p.prepared(self.source, verify_content=True), target)
+        self.assertIn('源录像发生变化', p.status(self.source))
+        status, _, body = self.request('/recording.mp4')
+        self.assertEqual((status, body), (200, target.read_bytes()))
+        self.assertNotIn(self.source, p.REJECTED)
+
+    def test_changed_source_can_request_recompression_without_losing_old_download(self):
+        old = self.publish()
+        old_bytes = old.read_bytes()
+        _, manifest = p.cache_paths(self.source)
+        record = json.loads(manifest.read_text())
+        record['completed_at'] -= p.POST_COMPRESSION_GRACE_SECONDS + 1
+        manifest.write_text(json.dumps(record))
+        self.source.write_bytes(b'b' * 4096)
+        status, _, page = self.request('/')
+        self.assertEqual(status, 200)
+        self.assertIn(b'\xe9\x87\x8d\xe6\x96\xb0\xe5\x8e\x8b\xe7\xbc\xa9', page)
+        self.assertEqual(self.request('/recording.mp4?recompress=1&token=wrong', method='POST')[0], 403)
+        self.assertEqual(self.request('/recording.mp4?recompress=1&token=' + server.ACTION_TOKEN, method='POST')[0], 303)
+        self.assertTrue(p.recompress_requested(self.source))
+        self.assertEqual(self.request('/recording.mp4')[2], old_bytes)
+        self.assertIn('旧压缩版仍可下载', p.status(self.source))
+        def new_encode(command, *args, **kwargs):
+            if command[-1] != '-':
+                Path(command[-1]).write_bytes(b'new compressed content')
+        with patch.object(p, 'duration', return_value=10), patch.object(p, 'run_checked', side_effect=new_encode):
+            p.prepare(self.source, p.signature(self.source))
+        self.assertFalse(p.recompress_requested(self.source))
+        self.assertEqual(self.request('/recording.mp4')[2], b'new compressed content')
+
+    def test_failed_manual_recompression_preserves_old_download(self):
+        old = self.publish()
+        _, manifest = p.cache_paths(self.source)
+        record = json.loads(manifest.read_text())
+        record['completed_at'] -= p.POST_COMPRESSION_GRACE_SECONDS + 1
+        manifest.write_text(json.dumps(record))
+        self.source.write_bytes(b'b' * 4096)
+        self.assertTrue(p.request_recompress(self.source))
+        with patch.object(p, 'duration', side_effect=ValueError('broken video')):
+            with self.assertRaises(ValueError):
+                p.prepare(self.source, p.signature(self.source))
+        self.assertTrue(p.recompress_requested(self.source))
+        self.assertEqual(self.request('/recording.mp4')[2], old.read_bytes())
+
+    def test_deleted_source_retains_listed_compressed_download(self):
+        old = self.publish()
+        expected = old.read_bytes()
+        self.source.unlink()
+        status, _, page = self.request('/')
+        self.assertEqual(status, 200)
+        self.assertIn('源录像已删除'.encode(), page)
+        self.assertNotIn('重新压缩'.encode(), page)
+        self.assertNotIn('下载原文件'.encode(), page)
+        self.assertEqual(self.request('/recording.mp4')[2], expected)
+        self.assertEqual(self.request('/recording.mp4?original=1')[0], 404)
+        self.assertEqual(self.request('/recording.mp4?recompress=1&token=' + server.ACTION_TOKEN, method='POST')[0], 409)
+
+    def test_old_manifest_uses_publication_mtime(self):
+        target = self.publish()
+        _, manifest = p.cache_paths(self.source)
+        record = json.loads(manifest.read_text())
+        record.pop('completed_at')
+        manifest.write_text(json.dumps(record))
+        old_time = manifest.stat().st_mtime - p.POST_COMPRESSION_GRACE_SECONDS - 1
+        os.utime(manifest, (old_time, old_time))
+        self.source.write_bytes(b'b' * 4096)
+        self.assertEqual(p.prepared(self.source), target)
+        self.assertIn('源录像发生变化', p.status(self.source))
+
+    def test_late_md5_only_change_keeps_hint_visible(self):
+        target = self.publish()
+        _, manifest = p.cache_paths(self.source)
+        record = json.loads(manifest.read_text())
+        record['completed_at'] -= p.POST_COMPRESSION_GRACE_SECONDS + 1
+        manifest.write_text(json.dumps(record))
+        self.source.write_bytes(b'b' * 4096)
+        with patch.object(p, 'stat_signature', return_value=self.before):
+            self.assertEqual(p.prepared(self.source, verify_content=True), target)
+            self.assertIn('源录像发生变化', p.status(self.source))
+        self.assertNotIn(self.source, p.REJECTED)
+
+    def test_early_change_detected_late_still_recompresses(self):
+        self.publish()
+        _, manifest = p.cache_paths(self.source)
+        record = json.loads(manifest.read_text())
+        record['completed_at'] -= 2 * p.POST_COMPRESSION_GRACE_SECONDS
+        manifest.write_text(json.dumps(record))
+        early_change = self.before.copy()
+        change_ns = int((record['completed_at'] + p.POST_COMPRESSION_GRACE_SECONDS / 2) * 1e9)
+        early_change[1:3] = [change_ns, change_ns]
+        with patch.object(p, 'signature', return_value=early_change):
+            self.assertIsNone(p.prepared(self.source))
+        self.assertIn(self.source, p.REJECTED)
+
+    def test_change_within_one_hour_still_invalidates_copy(self):
+        target = self.publish()
+        self.source.write_bytes(b'b' * 4096)
+        self.assertIsNone(p.prepared(self.source, verify_content=True))
+        self.assertIn(self.source, p.REJECTED)
+        self.assertTrue(target.exists())
+        self.assertEqual(self.request('/recording.mp4')[0], 503)
+
+    def test_failed_recompression_keeps_previous_file(self):
+        target = self.publish()
+        _, manifest = p.cache_paths(self.source)
+        old_manifest = manifest.read_bytes()
+        self.source.write_bytes(b'b' * 4096)
+        with patch.object(p, 'duration', return_value=10), patch.object(p, 'run_checked', side_effect=RuntimeError('broken video')):
+            with self.assertRaises(RuntimeError):
+                p.prepare(self.source, p.signature(self.source))
+        self.assertTrue(target.exists())
+        self.assertEqual(manifest.read_bytes(), old_manifest)
+        self.assertIsNone(p.prepared(self.source))
 
     def test_download_checks_md5_and_sends_complete_attachment(self):
         target = self.publish()

@@ -1,10 +1,12 @@
 """Read-only recording downloads, bound to loopback for Tailscale Serve."""
 import html
+import hmac
 import json
 import logging
 from logging.handlers import RotatingFileHandler
 import mimetypes
 import os
+import secrets
 import time
 import uuid
 from datetime import datetime, timezone
@@ -19,6 +21,7 @@ VIDEO = {'.mp4', '.mov', '.m4v', '.mkv', '.avi', '.ts'}
 DOWNLOAD_LOG = logging.getLogger('xiaomicamera.downloads')
 DOWNLOAD_LOG.addHandler(logging.NullHandler())
 DOWNLOAD_LOG.propagate = False
+ACTION_TOKEN = secrets.token_urlsafe(32)
 
 
 def configure_download_log():
@@ -42,6 +45,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.respond(True)
 
+    def do_POST(self):
+        self.respond(True)
+
     def respond(self, body):
         self.request_id = uuid.uuid4().hex[:12]
         self.started = time.monotonic()
@@ -54,7 +60,10 @@ class Handler(BaseHTTPRequestHandler):
         self.outcome = 'response'
         self.error_type = None
         try:
-            self.serve(body)
+            if self.command == 'POST':
+                self.serve_post()
+            else:
+                self.serve(body)
         except (BrokenPipeError, ConnectionResetError):
             self.outcome = 'disconnected'
         except (OSError, ValueError) as error:
@@ -122,7 +131,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_error(404)
         if path.is_dir():
             items = []
-            for p in sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name)):
+            entries = set(path.iterdir()) | set(playback.deleted_recordings(path))
+            for p in sorted(entries, key=lambda p: (not p.is_dir(), p.name)):
                 if p.name.startswith('.') or p.is_symlink():
                     continue
                 if not p.is_dir() and p.suffix.lower() not in VIDEO:
@@ -130,17 +140,26 @@ class Handler(BaseHTTPRequestHandler):
                 href = quote('/' + str(p.relative_to(ROOT)) + ('/' if p.is_dir() else ''))
                 name = html.escape(p.name + ('/' if p.is_dir() else ''))
                 extra = ''
-                if p.is_file():
+                if p.is_file() or not p.exists():
                     state = playback.status(p) if p.suffix.lower() == '.mp4' else '原文件'
-                    extra = '<br><small>{} · <a href="{}?original=1">下载原文件</a></small>'.format(html.escape(state), href)
+                    extra = '<br><small>{}'.format(html.escape(state))
+                    if p.is_file():
+                        extra += ' · <a href="{}?original=1">下载原文件</a>'.format(href)
+                        if p.suffix.lower() == '.mp4' and playback.changed(p):
+                            extra += (' · <form method="post" action="{}?recompress=1&amp;token={}" '
+                                      'style="display:inline"><button type="submit">重新压缩</button></form>'
+                                      .format(href, ACTION_TOKEN))
+                    extra += '</small>'
                 items.append('<li><a href="{}">{}</a>{}</li>'.format(href, name, extra))
             self.page('<h1>小米录像下载</h1><p>点击录像下载压缩版，再用本地播放器打开。</p>'
                       '<a href="../">返回上级</a><ul>' + ''.join(items) + '</ul>', body)
             return
-        if path.suffix.lower() not in VIDEO or not path.is_file():
+        if path.suffix.lower() not in VIDEO:
             return self.send_error(404)
         source = path
         original = parse_qs(url.query).get('original') == ['1']
+        if not path.is_file() and (original or path.suffix.lower() != '.mp4' or not playback.prepared(source)):
+            return self.send_error(404)
         name = source.name
         if source.suffix.lower() == '.mp4' and not original:
             # Check MD5 once per download, then pin the opened immutable file.
@@ -194,6 +213,25 @@ class Handler(BaseHTTPRequestHandler):
                     self.outcome = 'sent_to_proxy'
             else:
                 self.outcome = 'head_only'
+
+    def serve_post(self):
+        url = urlsplit(self.path)
+        parts = Path(unquote(url.path).lstrip('/')).parts
+        if any(p.startswith('.') for p in parts):
+            return self.send_error(404)
+        source = ROOT.joinpath(*parts).resolve()
+        if source == ROOT or ROOT not in source.parents or source.suffix.lower() != '.mp4':
+            return self.send_error(404)
+        params = parse_qs(url.query)
+        if params.get('recompress') != ['1'] or not hmac.compare_digest(params.get('token', [''])[0], ACTION_TOKEN):
+            return self.send_error(403)
+        if not playback.request_recompress(source):
+            return self.send_error(409, 'Source is not eligible for recompression')
+        self.send_response(303)
+        self.send_header('Location', quote('/' + str(source.parent.relative_to(ROOT)) + '/'))
+        self.send_header('Content-Length', '0')
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
 
 
 if __name__ == '__main__':

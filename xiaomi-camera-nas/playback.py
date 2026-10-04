@@ -20,8 +20,11 @@ CACHE = Path(__file__).resolve().parent / 'var' / 'playback'
 FFMPEG = shutil.which('ffmpeg') or '/Applications/Elmedia Player.app/Contents/Resources/ffmpeg'
 SETTLE_SECONDS = 5 * 60
 POLL_SECONDS = 15
+POST_COMPRESSION_GRACE_SECONDS = 60 * 60
 RECIPE = 'hevc-720p-15fps-400k-aac32-snapshot-md5-v4'
 STATES = {}
+STALE_HINTS = set()
+FORCE_RECOMPRESS = {}
 INVALIDATIONS = queue.SimpleQueue()
 REJECTED = set()
 STATE_LOCK = threading.Lock()
@@ -120,31 +123,135 @@ def cache_paths(source):
     return CACHE / (key + '.mp4'), CACHE / (key + '.json')
 
 
+def completed_at(record, manifest):
+    """Old manifests use their publication mtime as the completion timestamp."""
+    value = record.get('completed_at')
+    return value if isinstance(value, (int, float)) else manifest.stat().st_mtime
+
+
+def changed_after_grace(record, manifest, current):
+    return max(current[1], current[2]) / 1e9 > completed_at(record, manifest) + POST_COMPRESSION_GRACE_SECONDS
+
+
+def keep_older_copy(source):
+    with STATE_LOCK:
+        STALE_HINTS.add(source)
+
+
+def cached_record(source):
+    _, manifest = cache_paths(source)
+    record = json.loads(manifest.read_text())
+    if not isinstance(record, dict) or not re.fullmatch(r'[0-9a-f]{32}', record.get('source_md5', '')):
+        return None
+    name = record.get('file', '')
+    if not name or Path(name).name != name:
+        return None
+    target = CACHE / name
+    if not target.is_file() or target.stat().st_size != record.get('output_bytes'):
+        return None
+    return record, manifest, target
+
+
+def deleted_recordings(directory):
+    """Find published copies whose indexed source has since disappeared."""
+    for manifest in CACHE.glob('*.json'):
+        try:
+            record = json.loads(manifest.read_text())
+            relative = record.get('source_relative')
+            if not isinstance(relative, str):
+                continue
+            source = ROOT / relative
+            if (source.parent != directory or source.suffix.lower() != '.mp4' or
+                    source.exists() or source.is_symlink() or
+                    cache_paths(source)[1] != manifest):
+                continue
+            if cached_record(source):
+                yield source
+        except (OSError, ValueError, TypeError):
+            continue
+
+
+def index_existing_manifests():
+    """Migrate old manifests while their source filenames are still known."""
+    for source in recordings():
+        _, manifest = cache_paths(source)
+        try:
+            record = json.loads(manifest.read_text())
+            if not isinstance(record, dict) or record.get('source_relative'):
+                continue
+            record['completed_at'] = completed_at(record, manifest)
+            record['source_relative'] = str(source.relative_to(ROOT))
+            temporary = manifest.with_suffix('.index.part.json')
+            temporary.write_text(json.dumps(record))
+            os.replace(temporary, manifest)
+        except (OSError, ValueError, TypeError):
+            continue
+
+
+def request_recompress(source):
+    if not source.is_file() or not prepared(source, verify_content=True):
+        return False
+    with STATE_LOCK:
+        if source not in STALE_HINTS:
+            return False
+        FORCE_RECOMPRESS[source] = time.monotonic()
+        INVALIDATIONS.put(source)
+    STATES[source] = '等待文件稳定后重新压缩（' + QUIET_LABEL + '）；旧压缩版仍可下载'
+    return True
+
+
+def recompress_requested(source):
+    with STATE_LOCK:
+        return source in FORCE_RECOMPRESS
+
+
+def changed(source):
+    prepared(source)
+    with STATE_LOCK:
+        return source in STALE_HINTS
+
+
 def prepared(source, verify_content=False):
     if source.suffix.lower() != '.mp4':
         return None
-    _, manifest = cache_paths(source)
     try:
-        record = json.loads(manifest.read_text())
-        if not isinstance(record, dict) or not re.fullmatch(r'[0-9a-f]{32}', record.get('source_md5', '')):
+        cached = cached_record(source)
+        if cached is None:
             return None
+        record, manifest, target = cached
+        if not source.exists():
+            return target if record.get('source_relative') == str(source.relative_to(ROOT)) else None
         with STATE_LOCK:
             if source in REJECTED:
                 return None
         before = signature(source)
         if record.get('signature') != before:
+            if changed_after_grace(record, manifest, before):
+                keep_older_copy(source)
+                return target
             invalidate(source)
             return None
-        name = record.get('file', '')
-        if not name or Path(name).name != name:
-            return None
-        target = CACHE / name
-        if target.is_file() and target.stat().st_size == record.get('output_bytes'):
-            if verify_content and source_md5(source, before) != record['source_md5']:
+        if verify_content:
+            try:
+                matches = source_md5(source, before) == record['source_md5']
+            except SourceChanged:
+                current = signature(source)
+                if changed_after_grace(record, manifest, current):
+                    keep_older_copy(source)
+                    return target
                 invalidate(source)
                 return None
-            return target
-    except (OSError, ValueError, SourceChanged):
+            if not matches:
+                if time.time() > completed_at(record, manifest) + POST_COMPRESSION_GRACE_SECONDS:
+                    keep_older_copy(source)
+                    return target
+                invalidate(source)
+                return None
+        if verify_content:
+            with STATE_LOCK:
+                STALE_HINTS.discard(source)
+        return target
+    except (OSError, ValueError, TypeError, SourceChanged):
         if verify_content:
             invalidate(source)
     return None
@@ -153,7 +260,14 @@ def prepared(source, verify_content=False):
 def status(source):
     target = prepared(source)
     if target:
-        return '已压缩 · {:.1f} MiB'.format(target.stat().st_size / 1024**2)
+        if not source.exists():
+            return '已压缩 · {:.1f} MiB · 源录像已删除，仅保留压缩版'.format(target.stat().st_size / 1024**2)
+        with STATE_LOCK:
+            changed = source in STALE_HINTS
+            requested = source in FORCE_RECOMPRESS
+        hint = (' · 提示：源录像发生变化，旧压缩版仍可下载' +
+                ('；' + STATES.get(source, '等待重新压缩') if requested else '')) if changed else ''
+        return '已压缩 · {:.1f} MiB{}'.format(target.stat().st_size / 1024**2, hint)
     return STATES.get(source, '等待文件稳定（' + QUIET_LABEL + '）')
 
 
@@ -246,13 +360,16 @@ def prepare(source, before):
         os.replace(str(temporary), str(target))
         record = {'signature': before, 'source_md5': snapshot_md5, 'file': target.name,
                   'source_bytes': before[0], 'output_bytes': target.stat().st_size,
-                  'duration_seconds': output_duration}
+                  'duration_seconds': output_duration, 'completed_at': time.time(),
+                  'source_relative': str(source.relative_to(ROOT))}
         meta_tmp.write_text(json.dumps(record))
         assert_unchanged(source, before)
         os.replace(str(meta_tmp), str(manifest))
         published = True
         with STATE_LOCK:
             REJECTED.discard(source)
+            STALE_HINTS.discard(source)
+            FORCE_RECOMPRESS.pop(source, None)
         logging.info('Compressed %s: %.1f -> %.1f MiB (%.0f%% smaller), %.2fs',
                      source.name, before[0] / 1024**2, record['output_bytes'] / 1024**2,
                      (1 - record['output_bytes'] / before[0]) * 100, output_duration)
@@ -317,7 +434,11 @@ def _watch():
                 try:
                     fingerprint = signature(source)
                     ready = quiet.ready(source, fingerprint)
-                    if prepared(source) or source == active_source:
+                    with STATE_LOCK:
+                        requested_at = FORCE_RECOMPRESS.get(source)
+                    if requested_at is not None and time.monotonic() - requested_at < SETTLE_SECONDS:
+                        ready = False
+                    if (prepared(source) and not recompress_requested(source)) or source == active_source:
                         continue
                     if not ready:
                         STATES[source] = '等待文件稳定（' + QUIET_LABEL + '）'
@@ -338,11 +459,14 @@ def _watch():
                 retry_after.pop(source, None)
                 with STATE_LOCK:
                     REJECTED.discard(source)
+                    STALE_HINTS.discard(source)
+                    FORCE_RECOMPRESS.pop(source, None)
             time.sleep(POLL_SECONDS)
 
 
 def start():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+    index_existing_manifests()
     if not Path(FFMPEG).is_file():
         logging.error('FFmpeg not found: %s', FFMPEG)
         return
