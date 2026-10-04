@@ -239,6 +239,22 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(self.request('/recording.mp4?original=1')[0], 404)
         self.assertEqual(self.request('/recording.mp4?recompress=1&token=' + server.ACTION_TOKEN, method='POST')[0], 409)
 
+    def test_directory_shows_recording_time_range_and_keeps_filename_link(self):
+        name = '00_20261003224437_20261004005339.mp4'
+        (self.root / name).write_bytes(b'video')
+        status, _, page = self.request('/')
+        self.assertEqual(status, 200)
+        self.assertIn('2026-10-03 22:44:37 ～ 2026-10-04 00:53:39'.encode(), page)
+        self.assertIn(name.encode(), page)
+        self.assertIn(('href="/' + name + '"').encode(), page)
+
+    def test_recording_label_falls_back_for_invalid_or_other_names(self):
+        self.assertEqual(server.recording_label('00_20261004062452_20261004071702.mp4'),
+                         '2026-10-04 06:24:52 ～ 07:17:02')
+        for name in ('recording.mp4', '00_20261304062452_20261004071702.mp4',
+                     '00_20261004071702_20261004062452.mp4'):
+            self.assertEqual(server.recording_label(name), name)
+
     def test_old_manifest_uses_publication_mtime(self):
         target = self.publish()
         _, manifest = p.cache_paths(self.source)

@@ -6,6 +6,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import mimetypes
 import os
+import re
 import secrets
 import time
 import uuid
@@ -22,6 +23,22 @@ DOWNLOAD_LOG = logging.getLogger('xiaomicamera.downloads')
 DOWNLOAD_LOG.addHandler(logging.NullHandler())
 DOWNLOAD_LOG.propagate = False
 ACTION_TOKEN = secrets.token_urlsafe(32)
+RECORDING_TIMES = re.compile(r'^(?:.*_)?(\d{14})_(\d{14})\.[^.]+$')
+
+
+def recording_label(name):
+    match = RECORDING_TIMES.fullmatch(name)
+    if not match:
+        return name
+    try:
+        start, end = (datetime.strptime(value, '%Y%m%d%H%M%S') for value in match.groups())
+    except ValueError:
+        return name
+    if end < start:
+        return name
+    start_text = start.strftime('%Y-%m-%d %H:%M:%S')
+    end_text = end.strftime('%H:%M:%S' if start.date() == end.date() else '%Y-%m-%d %H:%M:%S')
+    return '{} ～ {}'.format(start_text, end_text)
 
 
 def configure_download_log():
@@ -138,7 +155,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not p.is_dir() and p.suffix.lower() not in VIDEO:
                     continue
                 href = quote('/' + str(p.relative_to(ROOT)) + ('/' if p.is_dir() else ''))
-                name = html.escape(p.name + ('/' if p.is_dir() else ''))
+                label = recording_label(p.name) if not p.is_dir() else p.name + '/'
+                name = html.escape(label)
+                if label != p.name and not p.is_dir():
+                    name += '<br><small>{}</small>'.format(html.escape(p.name))
                 extra = ''
                 if p.is_file() or not p.exists():
                     state = playback.status(p) if p.suffix.lower() == '.mp4' else '原文件'
