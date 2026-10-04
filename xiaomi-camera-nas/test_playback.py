@@ -118,6 +118,7 @@ class CacheTests(unittest.TestCase):
         old.write_bytes(b'legacy copy')
         manifest.write_text(json.dumps([4096, self.before[1], 1]))
         self.assertIsNone(p.prepared(self.source))
+
         with patch.object(p, 'duration', return_value=10), patch.object(p, 'run_checked', side_effect=self.fake_encode):
             p.prepare(self.source, self.before)
         output = p.prepared(self.source)
@@ -133,6 +134,16 @@ class CacheTests(unittest.TestCase):
         self.source.write_bytes(b'b' * 4096)
         os.utime(self.source, ns=(self.before[1], self.before[1]))
         self.assertIsNone(p.prepared(self.source))
+
+    def test_page_loads_external_stylesheet(self):
+        status, headers, page = self.request('/')
+        self.assertEqual(status, 200)
+        self.assertIn(b'href="/assets/style.css"', page)
+        self.assertNotIn(b'<style>', page)
+        status, headers, css = self.request('/assets/style.css')
+        self.assertEqual(status, 200)
+        self.assertEqual(headers['Content-Type'], 'text/css; charset=utf-8')
+        self.assertIn(b'.events-panel', css)
 
     def test_copy_with_unobserved_content_change_is_rejected(self):
         real_digest = p.source_md5

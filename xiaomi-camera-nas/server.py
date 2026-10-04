@@ -12,12 +12,14 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from string import Template
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 import playback
 import motion
 
 ROOT = Path(__file__).resolve().parent.parent
+WEB = Path(__file__).resolve().parent / 'web'
 LOG_DIR = Path(__file__).resolve().parent / 'var' / 'log'
 VIDEO = {'.mp4', '.mov', '.m4v', '.mkv', '.avi', '.ts'}
 DOWNLOAD_LOG = logging.getLogger('xiaomicamera.downloads')
@@ -121,16 +123,8 @@ class Handler(BaseHTTPRequestHandler):
                    transfer_seconds=round(elapsed, 4), total_seconds=round(now - self.started, 4),
                    send_MiB_s=round(self.file_bytes_sent / elapsed / 1024**2, 4) if elapsed else None)
 
-    def page(self, content, body, status=200):
-        page = ('<!doctype html><html lang="zh"><meta charset="utf-8">'
-                '<meta name="viewport" content="width=device-width,initial-scale=1">'
-                '<title>小米录像下载</title><style>body{font:18px system-ui;'
-                'max-width:900px;margin:40px auto;padding:0 20px}li{margin:20px 0;'
-                'overflow-wrap:anywhere}.events-panel{margin-top:8px}'
-                '.events-panel summary{cursor:pointer;font-size:15px}'
-                '.events{display:flex;flex-wrap:wrap;gap:12px;'
-                'padding:8px 0}.event{font-size:14px;width:160px}.event img{width:160px;'
-                'height:90px;object-fit:cover;display:block}</style>' + content + '</html>').encode()
+    def page(self, template, body, status=200, **values):
+        page = Template((WEB / template).read_text(encoding='utf-8')).substitute(values).encode('utf-8')
         self.send_response(status)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', str(len(page)))
@@ -142,13 +136,20 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(page)
 
     def waiting(self, source, body):
-        self.page('<h1>' + html.escape(playback.status(source)) + '</h1>'
-                  '<p>压缩完成后再下载，请稍后刷新目录。</p>'
-                  '<p><a href="./">返回目录</a> · '
-                  '<a href="?original=1">下载原文件</a></p>', body, status=503)
+        self.page('waiting.html', body, status=503, status_text=html.escape(playback.status(source)))
 
     def serve(self, body):
         url = urlsplit(self.path)
+        if url.path == '/assets/style.css':
+            data = (WEB / 'style.css').read_bytes()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/css; charset=utf-8')
+            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            if body:
+                self.wfile.write(data)
+            return
         parts = Path(unquote(url.path).lstrip('/')).parts
         if any(p.startswith('.') for p in parts):
             return self.send_error(404)
@@ -176,7 +177,7 @@ class Handler(BaseHTTPRequestHandler):
                         extra += ' · <a href="{}?original=1">下载原文件</a>'.format(href)
                         if p.suffix.lower() == '.mp4' and playback.changed(p):
                             extra += (' · <form method="post" action="{}?recompress=1&amp;token={}" '
-                                      'style="display:inline"><button type="submit">重新压缩</button></form>'
+                                      'class="recompress"><button type="submit">重新压缩</button></form>'
                                       .format(href, ACTION_TOKEN))
                     extra += '</small>'
                     if p.suffix.lower() == '.mp4':
@@ -198,8 +199,7 @@ class Handler(BaseHTTPRequestHandler):
                                 extra += ('<details class="events-panel"><summary>检测到 {} 处画面变化 · 展开关键帧</summary>'
                                           '<div class="events">{}</div></details>').format(len(cards), ''.join(cards))
                 items.append('<li><a href="{}">{}</a>{}</li>'.format(href, name, extra))
-            self.page('<h1>小米录像下载</h1><p>点击录像下载压缩版，再用本地播放器打开。</p>'
-                      '<a href="../">返回上级</a><ul>' + ''.join(items) + '</ul>', body)
+            self.page('index.html', body, items=''.join(items))
             return
         if path.suffix.lower() not in VIDEO:
             return self.send_error(404)

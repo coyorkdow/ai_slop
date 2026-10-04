@@ -1,0 +1,43 @@
+body {
+  font: 18px system-ui;
+  max-width: 900px;
+  margin: 40px auto;
+  padding: 0 20px;
+}
+
+li {
+  margin: 20px 0;
+  overflow-wrap: anywhere;
+}
+
+.recompress {
+  display: inline;
+}
+
+.events-panel {
+  margin-top: 8px;
+}
+
+.events-panel summary {
+  cursor: pointer;
+  font-size: 15px;
+}
+
+.events {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+.event {
+  font-size: 14px;
+  width: 160px;
+}
+
+.event img {
+  width: 160px;
+  height: 90px;
+  object-fit: cover;
+  display: block;
+}
