@@ -10,7 +10,7 @@
 	<array>
 		<string>__PYTHON3__</string>
 		<string>-u</string>
-		<string>/Users/Shared/XiaomiCamera/.remote-access/server.py</string>
+		<string>__REPO_DIR__/server.py</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
@@ -21,6 +21,13 @@
 	<key>ThrottleInterval</key>
 	<integer>10</integer>
 	<key>WorkingDirectory</key>
-	<string>/Users/Shared/XiaomiCamera</string>
+	<string>__REPO_DIR__</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>XIAOMI_CAMERA_ROOT</key>
+		<string>/Users/Shared/XiaomiCamera</string>
+		<key>XIAOMI_CAMERA_STATE</key>
+		<string>/Users/Shared/XiaomiCamera/.remote-access/var</string>
+	</dict>
 </dict>
 </plist>

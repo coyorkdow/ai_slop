@@ -18,9 +18,9 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 import playback
 import motion
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = playback.ROOT
 WEB = Path(__file__).resolve().parent / 'web'
-LOG_DIR = Path(__file__).resolve().parent / 'var' / 'log'
+LOG_DIR = playback.STATE / 'log'
 VIDEO = {'.mp4', '.mov', '.m4v', '.mkv', '.avi', '.ts'}
 DOWNLOAD_LOG = logging.getLogger('xiaomicamera.downloads')
 DOWNLOAD_LOG.addHandler(logging.NullHandler())

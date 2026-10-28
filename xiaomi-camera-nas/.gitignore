@@ -1,8 +1,8 @@
 # Camera recordings and generated videos
 *.mp4
 
-# Runtime output of .remote-access: logs, compression cache, manifests, locks, temp files
-/.remote-access/var/
+# Runtime output if XIAOMI_CAMERA_STATE points here (default lives under the recordings directory)
+/var/
 
 # Safety net for stray logs (including rotated backups such as downloads.jsonl.1)
 *.log

@@ -16,8 +16,9 @@ import time
 import uuid
 import motion
 
-ROOT = Path(__file__).resolve().parent.parent
-CACHE = Path(__file__).resolve().parent / 'var' / 'playback'
+ROOT = Path(os.environ.get('XIAOMI_CAMERA_ROOT', '/Users/Shared/XiaomiCamera')).resolve()
+STATE = Path(os.environ.get('XIAOMI_CAMERA_STATE', str(ROOT / '.remote-access' / 'var'))).resolve()
+CACHE = STATE / 'playback'
 FFMPEG = shutil.which('ffmpeg') or '/Applications/Elmedia Player.app/Contents/Resources/ffmpeg'
 SETTLE_SECONDS = 5 * 60
 POLL_SECONDS = 15

@@ -14,7 +14,7 @@
 
 压缩版发布后，后台使用 FFmpeg 每秒抽取 2 张 320×180 灰度图，并用 OpenCV 比较相隔约 2 秒的画面，做降噪、光照补偿及局部运动检测，以便发现夜视画面中缓慢移动的小动物。持续变化合并为事件；目录按录像显示事件数量，点击“展开关键帧”可查看缩略图和录像内时间，下载后可按该时间在播放器中定位。算法用于快速筛选，可能漏掉短暂或很小的活动，也可能把局部光影变化标为事件。
 
-索引与每份压缩文件绑定，重新压缩会重建索引；旧压缩版保留期间仍显示对应旧索引。分析失败时目录显示提示，录像下载不受影响。现有压缩版在服务重启后会逐个补建索引，长录像可能需要等待；检测结果保存在 `.remote-access/var/playback/` 中。运行服务的 Python 3.8 环境需要 `numpy==1.24.4` 和 `opencv-python-headless==4.8.1.78`。
+索引与每份压缩文件绑定，重新压缩会重建索引；旧压缩版保留期间仍显示对应旧索引。分析失败时目录显示提示，录像下载不受影响。现有压缩版在服务重启后会逐个补建索引，长录像可能需要等待；检测结果保存在状态目录的 `playback/` 中。运行服务的 Python 3.8 环境需要 `numpy==1.24.4` 和 `opencv-python-headless==4.8.1.78`。
 
 ## 写入检测与压缩
 
@@ -40,14 +40,15 @@
 
 ## 文件与运行
 
-- 原录像：`/Users/Shared/XiaomiCamera`
-- 下载服务：`.remote-access/server.py`，本机监听 `127.0.0.1:8765`
-- 压缩与一致性检查：`.remote-access/playback.py`
+- 原录像：`/Users/Shared/XiaomiCamera`，由环境变量 `XIAOMI_CAMERA_ROOT` 指定（默认即此路径）
+- 代码：`~/github/ai_slop/xiaomi-camera-nas/`，与录像目录分离
+- 下载服务：`server.py`，本机监听 `127.0.0.1:8765`
+- 压缩与一致性检查：`playback.py`
 - 无写入等待时间：`SETTLE_SECONDS = 5 * 60`
-- 运行时产生的文件全部在 `.remote-access/var/`，整个目录被 `.gitignore` 排除，可随时删除（删除压缩缓存后会重新压缩）：
+- 运行时产生的文件全部在 `XIAOMI_CAMERA_STATE`，默认 `/Users/Shared/XiaomiCamera/.remote-access/var/`（录像目录下的隐藏目录，不会出现在下载目录中），可随时删除（删除压缩缓存后会重新压缩）：
   - 压缩副本、清单、锁和临时文件：`var/playback/`
   - 日志：`var/log/server.log`、`var/log/server-error.log`、`var/log/downloads.jsonl`（及轮转备份 `.1`–`.3`）
-- 自启动：`~/Library/LaunchAgents/com.xiaomicamera.video-server.plist`
+- 自启动：`~/Library/LaunchAgents/com.xiaomicamera.video-server.plist`，内容与本目录的同名文件一致；修改后执行 `cp com.xiaomicamera.video-server.plist ~/Library/LaunchAgents/ && launchctl bootout gui/501/com.xiaomicamera.video-server; launchctl bootstrap gui/501 ~/Library/LaunchAgents/com.xiaomicamera.video-server.plist`
 
 总磁盘占用仍包含原文件和压缩副本；处理期间额外需要一份源文件快照及正在生成的压缩文件。正常完成或取消会清理快照，成功发布会删除该录像被替换的旧播放副本。异常断电可能留下临时文件，暂不自动清理已删除原录像对应的副本。
 
@@ -63,7 +64,7 @@ launchctl kickstart -k gui/501/com.xiaomicamera.video-server
 
 ## 下载诊断日志
 
-独立日志：`.remote-access/var/log/downloads.jsonl`，每行一个 JSON 对象。单文件最多约 5 MiB，保留 3 份轮转备份，时间采用 UTC（北京时间加 8 小时）。
+独立日志：`/Users/Shared/XiaomiCamera/.remote-access/var/log/downloads.jsonl`，每行一个 JSON 对象。单文件最多约 5 MiB，保留 3 份轮转备份，时间采用 UTC（北京时间加 8 小时）。
 
 ```sh
 tail -f /Users/Shared/XiaomiCamera/.remote-access/var/log/downloads.jsonl
@@ -91,7 +92,7 @@ tail -f /Users/Shared/XiaomiCamera/.remote-access/var/log/downloads.jsonl
 运行测试：
 
 ```sh
-python3 .remote-access/test_playback.py
+python3 test_playback.py
 ```
 
 测试覆盖 5 分钟观察、写入导致重新计时、复制/压缩期间继续写入、元数据相同而 MD5 不同、一小时内外的变化、手动重压缩失败后旧版仍可下载、源文件删除后的目录和下载、旧清单兼容、压缩失败及截断结果不可发布、处理中止、附件下载，以及下载中替换压缩文件仍读取同一份内容。
