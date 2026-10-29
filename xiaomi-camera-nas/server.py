@@ -27,21 +27,65 @@ DOWNLOAD_LOG.addHandler(logging.NullHandler())
 DOWNLOAD_LOG.propagate = False
 ACTION_TOKEN = secrets.token_urlsafe(32)
 RECORDING_TIMES = re.compile(r'^(?:.*_)?(\d{14})_(\d{14})\.[^.]+$')
+DATE_FOLDER = re.compile(r'\d{4}(?:-\d{2}(?:-\d{2})?)?')
 
 
-def recording_label(name):
+def recording_times(name):
     match = RECORDING_TIMES.fullmatch(name)
     if not match:
-        return name
+        return None
     try:
         start, end = (datetime.strptime(value, '%Y%m%d%H%M%S') for value in match.groups())
     except ValueError:
+        return None
+    return (start, end) if end >= start else None
+
+
+def recording_label(name):
+    times = recording_times(name)
+    if not times:
         return name
-    if end < start:
-        return name
+    start, end = times
     start_text = start.strftime('%Y-%m-%d %H:%M:%S')
     end_text = end.strftime('%H:%M:%S' if start.date() == end.date() else '%Y-%m-%d %H:%M:%S')
     return '{} ～ {}'.format(start_text, end_text)
+
+
+def recording_date(name):
+    """Virtual folder key (YYYY-MM-DD) from the recording's start time."""
+    times = recording_times(name)
+    return times[0].strftime('%Y-%m-%d') if times else None
+
+
+def date_folder_label(key):
+    if len(key) == 4:
+        return key
+    if len(key) == 7:
+        return datetime.strptime(key, '%Y-%m').strftime('%B')
+    day = datetime.strptime(key, '%Y-%m-%d')
+    return day.strftime('%b {} (%a)').format(day.day)
+
+
+def listing_href(directory, date=''):
+    relative = directory.relative_to(ROOT).as_posix()
+    href = '/' if relative == '.' else quote('/' + relative + '/')
+    return href + ('?date=' + date if date else '')
+
+
+def recording_listing(source):
+    return listing_href(source.parent, recording_date(source.name) or '')
+
+
+def file_size(path):
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return '—'
+    for unit in ('B', 'KiB', 'MiB'):
+        if size < 1024:
+            return '{:.0f} {}'.format(size, unit) if unit == 'B' else '{:.1f} {}'.format(size, unit)
+        size /= 1024
+    return '{:.1f} GiB'.format(size)
 
 
 def event_label(offset):
@@ -136,7 +180,8 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(page)
 
     def waiting(self, source, body):
-        self.page('waiting.html', body, status=503, status_text=html.escape(playback.status(source)))
+        self.page('waiting.html', body, status=503, status_text=html.escape(playback.status(source)),
+                  back=html.escape(recording_listing(source)))
 
     def serve(self, body):
         url = urlsplit(self.path)
@@ -157,50 +202,7 @@ class Handler(BaseHTTPRequestHandler):
         if path != ROOT and ROOT not in path.parents:
             return self.send_error(404)
         if path.is_dir():
-            items = []
-            entries = set(path.iterdir()) | set(playback.deleted_recordings(path))
-            for p in sorted(entries, key=lambda p: (not p.is_dir(), p.name)):
-                if p.name.startswith('.') or p.is_symlink():
-                    continue
-                if not p.is_dir() and p.suffix.lower() not in VIDEO:
-                    continue
-                href = quote('/' + str(p.relative_to(ROOT)) + ('/' if p.is_dir() else ''))
-                label = recording_label(p.name) if not p.is_dir() else p.name + '/'
-                name = html.escape(label)
-                if label != p.name and not p.is_dir():
-                    name += '<br><small>{}</small>'.format(html.escape(p.name))
-                extra = ''
-                if p.is_file() or not p.exists():
-                    state = playback.status(p) if p.suffix.lower() == '.mp4' else '原文件'
-                    extra = '<br><small>{}'.format(html.escape(state))
-                    if p.is_file():
-                        extra += ' · <a href="{}?original=1">下载原文件</a>'.format(href)
-                        if p.suffix.lower() == '.mp4' and playback.changed(p):
-                            extra += (' · <form method="post" action="{}?recompress=1&amp;token={}" '
-                                      'class="recompress"><button type="submit">重新压缩</button></form>'
-                                      .format(href, ACTION_TOKEN))
-                    extra += '</small>'
-                    if p.suffix.lower() == '.mp4':
-                        video = playback.prepared(p)
-                        if video:
-                            index = motion.read_index(video)
-                            if index is None:
-                                extra += '<br><small>画面变化分析中</small>'
-                            elif index['state'] == 'failed':
-                                extra += '<br><small>画面变化分析失败；录像仍可下载</small>'
-                            elif not index['events']:
-                                extra += '<br><small>未检测到明显活动</small>'
-                            else:
-                                cards = []
-                                for number, event in enumerate(index['events']):
-                                    label = html.escape(event_label(event['offset_seconds']))
-                                    cards.append('<span class="event"><img loading="lazy" src="{}?event_thumb={}" alt="">{}</span>'
-                                                 .format(href, number, label))
-                                extra += ('<details class="events-panel"><summary>检测到 {} 处画面变化 · 展开关键帧</summary>'
-                                          '<div class="events">{}</div></details>').format(len(cards), ''.join(cards))
-                items.append('<li><a href="{}">{}</a>{}</li>'.format(href, name, extra))
-            self.page('index.html', body, items=''.join(items))
-            return
+            return self.directory(path, parse_qs(url.query).get('date', [''])[0], body)
         if path.suffix.lower() not in VIDEO:
             return self.send_error(404)
         source = path
@@ -289,6 +291,97 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.outcome = 'head_only'
 
+    def directory(self, path, date, body):
+        """List a directory, grouping dated recordings into year/month/day folders."""
+        if date and not DATE_FOLDER.fullmatch(date):
+            return self.send_error(404)
+        child = {0: 4, 4: 7, 7: 10}.get(len(date))
+        dirs, folders, files = [], {}, []
+        entries = set(path.iterdir()) | set(playback.deleted_recordings(path))
+        for p in sorted(entries, key=lambda p: p.name):
+            if p.name.startswith('.') or p.is_symlink():
+                continue
+            if p.is_dir():
+                if not date:
+                    dirs.append(p)
+                continue
+            if p.suffix.lower() not in VIDEO:
+                continue
+            key = recording_date(p.name)
+            if key is None:
+                if not date:
+                    files.append(p)
+            elif key.startswith(date):
+                if child:
+                    folders[key[:child]] = folders.get(key[:child], 0) + 1
+                else:
+                    files.append(p)
+        rows = []
+        for p in dirs:
+            rows.append('<li class="folder"><span class="icon">📁</span><a class="name" href="{}">{}</a>'
+                        '<span class="meta">文件夹</span></li>'.format(listing_href(p), html.escape(p.name)))
+        for key, count in folders.items():
+            rows.append('<li class="folder"><span class="icon">📁</span><a class="name" href="{}">{}</a>'
+                        '<span class="meta">{} 个录像</span></li>'
+                        .format(html.escape(listing_href(path, key)), date_folder_label(key), count))
+        rows.extend(self.recording_row(p) for p in files)
+        if not rows:
+            rows.append('<li class="empty">此文件夹为空</li>')
+
+        crumbs = [(listing_href(ROOT), '全部录像')]
+        current = ROOT
+        for part in path.relative_to(ROOT).parts:
+            current = current / part
+            crumbs.append((listing_href(current), part))
+        for length in (4, 7, 10):
+            if len(date) >= length:
+                crumbs.append((listing_href(path, date[:length]), date_folder_label(date[:length])))
+        trail = ' <span class="sep">›</span> '.join(
+            '<a href="{}">{}</a>'.format(html.escape(href), html.escape(label)) for href, label in crumbs[:-1])
+        trail += (' <span class="sep">›</span> ' if len(crumbs) > 1 else '') + \
+            '<span class="current">{}</span>'.format(html.escape(crumbs[-1][1]))
+        if len(crumbs) > 1:
+            up = '<a class="up" href="{}" title="返回上级">↑ 上级</a>'.format(html.escape(crumbs[-2][0]))
+        else:
+            up = '<span class="up disabled">↑ 上级</span>'
+        self.page('index.html', body, crumbs=trail, up=up, items=''.join(rows))
+
+    def recording_row(self, p):
+        href = quote('/' + str(p.relative_to(ROOT)))
+        label = recording_label(p.name)
+        name = html.escape(label)
+        if label != p.name:
+            name += '<br><small>{}</small>'.format(html.escape(p.name))
+        state = playback.status(p) if p.suffix.lower() == '.mp4' else '原文件'
+        extra = '<br><small>{}'.format(html.escape(state))
+        if p.is_file():
+            extra += ' · <a href="{}?original=1">下载原文件</a>'.format(href)
+            if p.suffix.lower() == '.mp4' and playback.changed(p):
+                extra += (' · <form method="post" action="{}?recompress=1&amp;token={}" '
+                          'class="recompress"><button type="submit">重新压缩</button></form>'
+                          .format(href, ACTION_TOKEN))
+        extra += '</small>'
+        if p.suffix.lower() == '.mp4':
+            video = playback.prepared(p)
+            if video:
+                index = motion.read_index(video)
+                if index is None:
+                    extra += '<br><small>画面变化分析中</small>'
+                elif index['state'] == 'failed':
+                    extra += '<br><small>画面变化分析失败；录像仍可下载</small>'
+                elif not index['events']:
+                    extra += '<br><small>未检测到明显活动</small>'
+                else:
+                    cards = []
+                    for number, event in enumerate(index['events']):
+                        label = html.escape(event_label(event['offset_seconds']))
+                        cards.append('<span class="event"><img loading="lazy" src="{}?event_thumb={}" alt="">{}</span>'
+                                     .format(href, number, label))
+                    extra += ('<details class="events-panel"><summary>检测到 {} 处画面变化 · 展开关键帧</summary>'
+                              '<div class="events">{}</div></details>').format(len(cards), ''.join(cards))
+        return ('<li class="file"><span class="icon">🎞️</span><div class="name"><a href="{}">{}</a>{}</div>'
+                '<span class="meta">{}</span></li>').format(href, name, extra, file_size(p))
+
     def serve_post(self):
         url = urlsplit(self.path)
         parts = Path(unquote(url.path).lstrip('/')).parts
@@ -303,7 +396,7 @@ class Handler(BaseHTTPRequestHandler):
         if not playback.request_recompress(source):
             return self.send_error(409, 'Source is not eligible for recompression')
         self.send_response(303)
-        self.send_header('Location', quote('/' + str(source.parent.relative_to(ROOT)) + '/'))
+        self.send_header('Location', recording_listing(source))
         self.send_header('Content-Length', '0')
         self.send_header('Cache-Control', 'no-store')
         self.end_headers()

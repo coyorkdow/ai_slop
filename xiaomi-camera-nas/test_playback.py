@@ -255,11 +255,46 @@ class CacheTests(unittest.TestCase):
     def test_directory_shows_recording_time_range_and_keeps_filename_link(self):
         name = '00_20261003224437_20261004005339.mp4'
         (self.root / name).write_bytes(b'video')
-        status, _, page = self.request('/')
+        status, _, page = self.request('/?date=2026-10-03')
         self.assertEqual(status, 200)
         self.assertIn('2026-10-03 22:44:37 ～ 2026-10-04 00:53:39'.encode(), page)
         self.assertIn(name.encode(), page)
         self.assertIn(('href="/' + name + '"').encode(), page)
+
+    def test_directory_groups_recordings_into_date_folders(self):
+        (self.root / '00_20261003224437_20261004005339.mp4').write_bytes(b'video')
+        (self.root / '00_20261029154539_20261029155743.mp4').write_bytes(b'video')
+        (self.root / '00_20250101000000_20250101001000.mp4').write_bytes(b'video')
+        (self.root / 'camera').mkdir()
+        page = self.request('/')[2].decode()
+        self.assertIn('href="/?date=2026">2026</a><span class="meta">2 个录像', page)
+        self.assertIn('href="/?date=2025">2025', page)
+        self.assertIn('href="/camera/">camera</a>', page)
+        self.assertIn('href="/recording.mp4"', page)
+        self.assertNotIn('00_20261029154539', page)
+        page = self.request('/?date=2026')[2].decode()
+        self.assertIn('href="/?date=2026-10">October</a>', page)
+        self.assertNotIn('recording.mp4', page)
+        self.assertNotIn('camera', page)
+        page = self.request('/?date=2026-10')[2].decode()
+        self.assertIn('href="/?date=2026-10-03">Oct 3 (Sat)</a><span class="meta">1 个录像', page)
+        self.assertIn('href="/?date=2026-10-29">Oct 29 (Thu)</a>', page)
+        page = self.request('/?date=2026-10-29')[2].decode()
+        self.assertIn('href="/00_20261029154539_20261029155743.mp4"', page)
+        self.assertNotIn('00_20261003224437', page)
+        self.assertIn('<a href="/?date=2026-10">October</a> <span class="sep">›</span> '
+                      '<span class="current">Oct 29 (Thu)</span>', page)
+        self.assertIn('<a class="up" href="/?date=2026-10"', page)
+        self.assertEqual(self.request('/?date=2026-1')[0], 404)
+        self.assertEqual(self.request('/?date=<x>')[0], 404)
+
+    def test_recompress_redirects_to_recording_day_folder(self):
+        source = self.root / '00_20261029154539_20261029155743.mp4'
+        source.write_bytes(b'a' * 4096)
+        with patch.object(p, 'request_recompress', return_value=True):
+            status, headers, _ = self.request('/' + source.name + '?recompress=1&token=' + server.ACTION_TOKEN,
+                                              method='POST')
+        self.assertEqual((status, headers['Location']), (303, '/?date=2026-10-29'))
 
     def test_directory_lists_motion_and_serves_only_indexed_thumbnail(self):
         video = self.publish()
@@ -272,7 +307,7 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn('录像内 0:00:12'.encode(), page)
         self.assertIn('<details class="events-panel"><summary>检测到 1 处画面变化 · 展开关键帧</summary>'.encode(), page)
-        self.assertIn(b'</div></details></li>', page)
+        self.assertIn(b'</div></details></div>', page)
         self.assertNotIn(b'<details class="events-panel" open', page)
         self.assertNotIn('约 '.encode(), page)
         self.assertEqual(server.event_label(3661.9), '录像内 1:01:01')
