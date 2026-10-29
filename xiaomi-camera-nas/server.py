@@ -66,14 +66,22 @@ def date_folder_label(key):
     return day.strftime('%b {} (%a)').format(day.day)
 
 
-def listing_href(directory, date=''):
-    relative = directory.relative_to(ROOT).as_posix()
-    href = '/' if relative == '.' else quote('/' + relative + '/')
-    return href + ('?date=' + date if date else '')
+def listing_href(date=''):
+    return '/?date=' + date if date else '/'
 
 
 def recording_listing(source):
-    return listing_href(source.parent, recording_date(source.name) or '')
+    return listing_href(recording_date(source.name) or '')
+
+
+def all_recordings():
+    """Every video under ROOT, wherever the NAS writer happened to put it."""
+    for directory, dirs, files in os.walk(str(ROOT), followlinks=False):
+        dirs[:] = [d for d in dirs if not d.startswith('.') and not Path(directory, d).is_symlink()]
+        for name in files:
+            path = Path(directory, name)
+            if not name.startswith('.') and path.suffix.lower() in VIDEO and not path.is_symlink():
+                yield path
 
 
 def file_size(path):
@@ -202,7 +210,16 @@ class Handler(BaseHTTPRequestHandler):
         if path != ROOT and ROOT not in path.parents:
             return self.send_error(404)
         if path.is_dir():
-            return self.directory(path, parse_qs(url.query).get('date', [''])[0], body)
+            date = parse_qs(url.query).get('date', [''])[0]
+            if path != ROOT:
+                # The listing is virtual; old links to real NAS folders land on the same date.
+                self.send_response(302)
+                self.send_header('Location', listing_href(date if DATE_FOLDER.fullmatch(date) else ''))
+                self.send_header('Content-Length', '0')
+                self.send_header('Cache-Control', 'no-store')
+                self.end_headers()
+                return
+            return self.directory(date, body)
         if path.suffix.lower() not in VIDEO:
             return self.send_error(404)
         source = path
@@ -291,22 +308,17 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.outcome = 'head_only'
 
-    def directory(self, path, date, body):
-        """List a directory, grouping dated recordings into year/month/day folders."""
+    def directory(self, date, body):
+        """Group every recording into year/month/day folders parsed from its filename.
+
+        The NAS writer has moved recordings between real folders before, so the
+        real directory layout is ignored."""
         if date and not DATE_FOLDER.fullmatch(date):
             return self.send_error(404)
         child = {0: 4, 4: 7, 7: 10}.get(len(date))
-        dirs, folders, files = [], {}, []
-        entries = set(path.iterdir()) | set(playback.deleted_recordings(path))
-        for p in sorted(entries, key=lambda p: p.name):
-            if p.name.startswith('.') or p.is_symlink():
-                continue
-            if p.is_dir():
-                if not date:
-                    dirs.append(p)
-                continue
-            if p.suffix.lower() not in VIDEO:
-                continue
+        folders, files = {}, []
+        entries = set(all_recordings()) | set(playback.deleted_recordings())
+        for p in sorted(entries, key=lambda p: (p.name, p.relative_to(ROOT).as_posix())):
             key = recording_date(p.name)
             if key is None:
                 if not date:
@@ -317,25 +329,19 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     files.append(p)
         rows = []
-        for p in dirs:
-            rows.append('<li class="folder"><span class="icon">📁</span><a class="name" href="{}">{}</a>'
-                        '<span class="meta">文件夹</span></li>'.format(listing_href(p), html.escape(p.name)))
-        for key, count in folders.items():
+        for key, count in sorted(folders.items()):
             rows.append('<li class="folder"><span class="icon">📁</span><a class="name" href="{}">{}</a>'
                         '<span class="meta">{} 个录像</span></li>'
-                        .format(html.escape(listing_href(path, key)), date_folder_label(key), count))
-        rows.extend(self.recording_row(p) for p in files)
+                        .format(html.escape(listing_href(key)), date_folder_label(key), count))
+        names = [p.name for p in files]
+        rows.extend(self.recording_row(p, names.count(p.name) > 1) for p in files)
         if not rows:
             rows.append('<li class="empty">此文件夹为空</li>')
 
-        crumbs = [(listing_href(ROOT), '全部录像')]
-        current = ROOT
-        for part in path.relative_to(ROOT).parts:
-            current = current / part
-            crumbs.append((listing_href(current), part))
+        crumbs = [(listing_href(), '全部录像')]
         for length in (4, 7, 10):
             if len(date) >= length:
-                crumbs.append((listing_href(path, date[:length]), date_folder_label(date[:length])))
+                crumbs.append((listing_href(date[:length]), date_folder_label(date[:length])))
         trail = ' <span class="sep">›</span> '.join(
             '<a href="{}">{}</a>'.format(html.escape(href), html.escape(label)) for href, label in crumbs[:-1])
         trail += (' <span class="sep">›</span> ' if len(crumbs) > 1 else '') + \
@@ -346,12 +352,15 @@ class Handler(BaseHTTPRequestHandler):
             up = '<span class="up disabled">↑ 上级</span>'
         self.page('index.html', body, crumbs=trail, up=up, items=''.join(rows))
 
-    def recording_row(self, p):
+    def recording_row(self, p, show_location=False):
         href = quote('/' + str(p.relative_to(ROOT)))
         label = recording_label(p.name)
         name = html.escape(label)
         if label != p.name:
             name += '<br><small>{}</small>'.format(html.escape(p.name))
+        if show_location:
+            # Same filename in several real folders, e.g. a re-uploaded recording.
+            name += '<br><small>位置：{}</small>'.format(html.escape(p.relative_to(ROOT).as_posix()))
         state = playback.status(p) if p.suffix.lower() == '.mp4' else '原文件'
         extra = '<br><small>{}'.format(html.escape(state))
         if p.is_file():

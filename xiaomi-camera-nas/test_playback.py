@@ -263,13 +263,14 @@ class CacheTests(unittest.TestCase):
 
     def test_directory_groups_recordings_into_date_folders(self):
         (self.root / '00_20261003224437_20261004005339.mp4').write_bytes(b'video')
-        (self.root / '00_20261029154539_20261029155743.mp4').write_bytes(b'video')
+        nested = self.root / 'camera' / 'camera'
+        nested.mkdir(parents=True)
+        (nested / '00_20261029154539_20261029155743.mp4').write_bytes(b'video')
         (self.root / '00_20250101000000_20250101001000.mp4').write_bytes(b'video')
-        (self.root / 'camera').mkdir()
         page = self.request('/')[2].decode()
         self.assertIn('href="/?date=2026">2026</a><span class="meta">2 个录像', page)
         self.assertIn('href="/?date=2025">2025', page)
-        self.assertIn('href="/camera/">camera</a>', page)
+        self.assertNotIn('camera', page)
         self.assertIn('href="/recording.mp4"', page)
         self.assertNotIn('00_20261029154539', page)
         page = self.request('/?date=2026')[2].decode()
@@ -280,13 +281,29 @@ class CacheTests(unittest.TestCase):
         self.assertIn('href="/?date=2026-10-03">Oct 3 (Sat)</a><span class="meta">1 个录像', page)
         self.assertIn('href="/?date=2026-10-29">Oct 29 (Thu)</a>', page)
         page = self.request('/?date=2026-10-29')[2].decode()
-        self.assertIn('href="/00_20261029154539_20261029155743.mp4"', page)
+        self.assertIn('href="/camera/camera/00_20261029154539_20261029155743.mp4"', page)
+        self.assertNotIn('位置：', page)
         self.assertNotIn('00_20261003224437', page)
         self.assertIn('<a href="/?date=2026-10">October</a> <span class="sep">›</span> '
                       '<span class="current">Oct 29 (Thu)</span>', page)
         self.assertIn('<a class="up" href="/?date=2026-10"', page)
         self.assertEqual(self.request('/?date=2026-1')[0], 404)
         self.assertEqual(self.request('/?date=<x>')[0], 404)
+
+    def test_real_folders_redirect_to_virtual_listing(self):
+        (self.root / 'camera').mkdir()
+        status, headers, _ = self.request('/camera/?date=2026-10-29')
+        self.assertEqual((status, headers['Location']), (302, '/?date=2026-10-29'))
+        self.assertEqual(self.request('/camera/?date=<x>')[1]['Location'], '/')
+
+    def test_same_filename_in_two_folders_shows_both_locations(self):
+        name = '00_20261029205944_20261029213643.mp4'
+        (self.root / name).write_bytes(b'partial')
+        (self.root / 'camera').mkdir()
+        (self.root / 'camera' / name).write_bytes(b'complete')
+        page = self.request('/?date=2026-10-29')[2].decode()
+        self.assertIn('位置：' + name, page)
+        self.assertIn('位置：camera/' + name, page)
 
     def test_recompress_redirects_to_recording_day_folder(self):
         source = self.root / '00_20261029154539_20261029155743.mp4'

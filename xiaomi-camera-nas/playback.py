@@ -154,7 +154,7 @@ def cached_record(source):
     return record, manifest, target
 
 
-def deleted_recordings(directory):
+def deleted_recordings():
     """Find published copies whose indexed source has since disappeared."""
     for manifest in CACHE.glob('*.json'):
         try:
@@ -163,7 +163,7 @@ def deleted_recordings(directory):
             if not isinstance(relative, str):
                 continue
             source = ROOT / relative
-            if (source.parent != directory or source.suffix.lower() != '.mp4' or
+            if (source.suffix.lower() != '.mp4' or
                     source.exists() or source.is_symlink() or
                     cache_paths(source)[1] != manifest):
                 continue
