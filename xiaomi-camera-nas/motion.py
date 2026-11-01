@@ -130,6 +130,10 @@ def build(video, ffmpeg):
         part.write_text(json.dumps(record))
         os.replace(str(part), str(target))
         keep = {event['thumbnail'] for event in event_records} if record['state'] == 'ready' else set()
+        if not video.exists():
+            # The copy was deleted during analysis; leave nothing behind for it.
+            keep = set()
+            target.unlink()
         for thumb in video.parent.glob(video.stem + '.event-*.png'):
             if thumb.name not in keep:
                 thumb.unlink()

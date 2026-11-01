@@ -108,8 +108,39 @@ body {
   white-space: nowrap;
 }
 
-.recompress {
+.action {
   display: inline;
+}
+
+.batch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #d0d4da;
+  font-size: 15px;
+}
+
+.batch .selected {
+  color: #5f6368;
+  margin-right: auto;
+}
+
+.rows .icon input {
+  width: 18px;
+  height: 18px;
+  margin: 2px 0 0;
+}
+
+.notice {
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: #e6f4ea;
+}
+
+.danger {
+  color: #b3261e;
 }
 
 .events-panel {

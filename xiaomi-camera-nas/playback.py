@@ -202,6 +202,57 @@ def request_recompress(source):
     return True
 
 
+def forget(source):
+    with STATE_LOCK:
+        REJECTED.discard(source)
+        STALE_HINTS.discard(source)
+        FORCE_RECOMPRESS.pop(source, None)
+    STATES.pop(source, None)
+
+
+def purge_cache(source):
+    """Remove every published copy, manifest, motion index and thumbnail for a source."""
+    old_target, manifest = cache_paths(source)
+    removed = False
+    try:
+        manifest.unlink()
+        removed = True
+    except FileNotFoundError:
+        pass
+    for path in set(CACHE.glob(old_target.stem + '.*.mp4')) | {old_target}:
+        if path.name.endswith(('.part.mp4', '.snapshot.mp4')):
+            continue
+        for generated in [path, motion.index_path(path)] + list(CACHE.glob(path.stem + '.event-*.png')):
+            try:
+                generated.unlink()
+                removed = True
+            except FileNotFoundError:
+                pass
+    forget(source)
+    return removed
+
+
+def delete_compressed(source):
+    """Drop the playback copy; a surviving source is compressed and indexed again."""
+    if not prepared(source):
+        return False
+    purge_cache(source)
+    logging.info('Deleted compressed copy of %s', source.name)
+    return True
+
+
+def delete_original(source):
+    """Delete the NAS original; with no compressed copy left, forget the recording."""
+    if not source.is_file() or source.is_symlink():
+        return False
+    source.unlink()
+    if not prepared(source):
+        purge_cache(source)
+    forget(source)
+    logging.info('Deleted original %s', source.name)
+    return True
+
+
 def recompress_requested(source):
     with STATE_LOCK:
         return source in FORCE_RECOMPRESS

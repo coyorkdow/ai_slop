@@ -1,4 +1,5 @@
 import json
+from urllib.parse import urlencode
 import hashlib
 import io
 import os
@@ -251,6 +252,111 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(self.request('/recording.mp4')[2], expected)
         self.assertEqual(self.request('/recording.mp4?original=1')[0], 404)
         self.assertEqual(self.request('/recording.mp4?recompress=1&token=' + server.ACTION_TOKEN, method='POST')[0], 409)
+
+    def post(self, path):
+        return self.request(path + '&token=' + server.ACTION_TOKEN, method='POST')
+
+    def generated_files(self):
+        return sorted(f.name for f in self.cache.iterdir() if not f.name.startswith('.'))
+
+    def test_delete_compressed_keeps_original_and_recompresses(self):
+        video = self.publish()
+        motion.index_path(video).write_text('{}')
+        motion.thumbnail_path(video, 0).write_bytes(b'thumbnail')
+        page = self.request('/')[2].decode()
+        self.assertIn('?delete=compressed', page)
+        self.assertIn('?delete=original', page)
+        status, headers, _ = self.post('/recording.mp4?delete=compressed')
+        self.assertEqual((status, headers['Location']), (303, '/'))
+        self.assertEqual(self.generated_files(), [])
+        self.assertEqual(self.source.read_bytes(), b'a' * 4096)
+        page = self.request('/')[2].decode()
+        self.assertIn('等待文件稳定', page)
+        self.assertNotIn('?delete=compressed', page)
+        self.assertEqual(self.post('/recording.mp4?delete=compressed')[0], 409)
+        self.assertIsNotNone(self.publish())
+
+    def test_delete_original_then_compressed_forgets_recording(self):
+        expected = self.publish().read_bytes()
+        self.assertEqual(self.post('/recording.mp4?delete=original')[0], 303)
+        self.assertFalse(self.source.exists())
+        page = self.request('/')[2].decode()
+        self.assertIn('源录像已删除', page)
+        self.assertNotIn('?delete=original', page)
+        self.assertEqual(self.request('/recording.mp4')[2], expected)
+        self.assertEqual(self.post('/recording.mp4?delete=original')[0], 409)
+        self.assertEqual(self.post('/recording.mp4?delete=compressed')[0], 303)
+        self.assertEqual(self.generated_files(), [])
+        self.assertIn('此文件夹为空', self.request('/')[2].decode())
+        self.assertEqual(self.request('/recording.mp4')[0], 404)
+
+    def test_delete_uncompressed_original_removes_stale_records(self):
+        _, manifest = p.cache_paths(self.source)
+        manifest.write_text(json.dumps({'source_md5': 'x', 'file': 'missing.mp4'}))
+        self.assertEqual(self.post('/recording.mp4?delete=original')[0], 303)
+        self.assertFalse(self.source.exists())
+        self.assertEqual(self.generated_files(), [])
+        self.assertIn('此文件夹为空', self.request('/')[2].decode())
+
+    def test_motion_index_for_copy_deleted_during_analysis_is_discarded(self):
+        video = self.cache / 'gone.mp4'
+        with patch.object(motion, 'decoded_frames', return_value=iter([])):
+            motion.build(video, 'ffmpeg')
+        self.assertEqual(self.generated_files(), [])
+
+    def batch(self, form, token=None):
+        """POST a form body; request() only sends headers, so build the raw request here."""
+        payload = urlencode(form, doseq=True).encode()
+        path = '/?batch=1&token=' + (token or server.ACTION_TOKEN)
+        raw = ('POST {} HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\n'
+               'Content-Length: {}\r\n\r\n'.format(path, len(payload))).encode() + payload
+        sock = SimpleNamespace(input=io.BytesIO(raw), output=io.BytesIO())
+        sock.makefile = lambda *args, **kwargs: sock.input
+        sock.sendall = sock.output.write
+        with patch.object(server, 'ROOT', self.root), patch.object(server.Handler, 'log_message'):
+            server.Handler(sock, ('127.0.0.1', 0), SimpleNamespace())
+        header = sock.output.getvalue().split(b'\r\n\r\n', 1)[0].decode().split('\r\n')
+        return int(header[0].split()[1]), dict(line.split(': ', 1) for line in header[1:])
+
+    def test_day_folder_has_checkboxes_and_batch_deletes_one_kind(self):
+        names = ['00_20261029154539_20261029155743.mp4', '00_20261029155744_20261029160927.mp4',
+                 '00_20261029160927_20261029174832.mp4']
+        for name in names:
+            (self.root / name).write_bytes(b'a' * 4096)
+        self.source = self.root / names[0]
+        self.publish()
+        page = self.request('/?date=2026-10-29')[2].decode()
+        self.assertIn('<form id="batch"', page)
+        self.assertIn(b'data-select', self.request('/assets/batch.js')[2])
+        self.assertIn('data-select="all"', page)
+        self.assertEqual(page.count('type="checkbox" form="batch" name="path"'), 3)
+        self.assertNotIn('<form id="batch"', self.request('/?date=2026-10')[2].decode())
+        status, headers = self.batch({'delete': 'compressed', 'date': '2026-10-29', 'path': names[:2]})
+        self.assertEqual((status, headers['Location']),
+                         (303, '/?date=2026-10-29&kind=compressed&deleted=1&skipped=1'))
+        self.assertIsNone(p.prepared(self.source))
+        self.assertTrue(all((self.root / name).exists() for name in names))
+        page = self.request(headers['Location'])[2].decode()
+        self.assertIn('已删除 1 个压缩版；1 个没有可删除的压缩版，已跳过', page)
+        status, headers = self.batch({'delete': 'original', 'date': '2026-10-29', 'path': names[1:]})
+        self.assertEqual(headers['Location'], '/?date=2026-10-29&kind=original&deleted=2&skipped=0')
+        self.assertEqual(sorted(f.name for f in self.root.glob('00_*.mp4')), [names[0]])
+
+    def test_batch_rejects_bad_token_paths_and_actions(self):
+        (self.root / 'recording.mp4').write_bytes(b'a' * 4096)
+        form = {'delete': 'original', 'date': '2026-10-29', 'path': ['recording.mp4']}
+        self.assertEqual(self.batch(form, token='wrong')[0], 403)
+        for bad in ({'path': ['../recording.mp4']}, {'path': ['.cache/x.mp4']}, {'path': []},
+                    {'delete': 'everything'}, {'date': '<x>'}):
+            self.assertEqual(self.batch(dict(form, **bad))[0], 400, bad)
+        self.assertTrue(self.source.exists())
+
+    def test_delete_requires_token_and_known_action(self):
+        self.publish()
+        self.assertEqual(self.request('/recording.mp4?delete=original&token=wrong', method='POST')[0], 403)
+        self.assertEqual(self.post('/recording.mp4?delete=everything')[0], 403)
+        self.assertTrue(self.source.exists())
+        self.assertIsNotNone(p.prepared(self.source))
 
     def test_directory_shows_recording_time_range_and_keeps_filename_link(self):
         name = '00_20261003224437_20261004005339.mp4'
