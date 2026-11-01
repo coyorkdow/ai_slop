@@ -1,6 +1,6 @@
 # 远程下载录像
 
-访问地址：`http://<机器名>.<tailnet>.ts.net/`
+访问地址：`http://<机器名>.<tailnet>.ts.net/`（即这台 Mac 的 Tailscale MagicDNS 完整域名，可用 `tailscale status --self` 查看）
 
 手机或远程电脑安装 Tailscale，登录与这台 Mac 相同的账号并连接，然后打开上述完整域名。服务仅在 Tailscale 私人网络内提供访问。
 
@@ -62,7 +62,14 @@
 - 运行时产生的文件全部在 `XIAOMI_CAMERA_STATE`，默认 `/Users/Shared/XiaomiCamera/.remote-access/var/`（录像目录下的隐藏目录，不会出现在下载目录中），可随时删除（删除压缩缓存后会重新压缩）：
   - 压缩副本、清单、锁和临时文件：`var/playback/`
   - 日志：`var/log/server.log`、`var/log/server-error.log`、`var/log/downloads.jsonl`（及轮转备份 `.1`–`.3`）
-- 自启动：`~/Library/LaunchAgents/com.xiaomicamera.video-server.plist`，内容与本目录的同名文件一致；修改后执行 `cp com.xiaomicamera.video-server.plist ~/Library/LaunchAgents/ && launchctl bootout gui/501/com.xiaomicamera.video-server; launchctl bootstrap gui/501 ~/Library/LaunchAgents/com.xiaomicamera.video-server.plist`
+- 自启动：`~/Library/LaunchAgents/com.xiaomicamera.video-server.plist`，由本目录的同名模板生成：`__PYTHON3__` 替换为装有 numpy 和 OpenCV 的 Python 解释器，`__REPO_DIR__` 替换为本目录。首次安装或修改后，在本目录用该 Python 环境执行：
+
+  ```sh
+  sed -e "s|__PYTHON3__|$(python3 -c 'import sys; print(sys.executable)')|" -e "s|__REPO_DIR__|$PWD|" \
+    com.xiaomicamera.video-server.plist > ~/Library/LaunchAgents/com.xiaomicamera.video-server.plist
+  launchctl bootout gui/$(id -u)/com.xiaomicamera.video-server
+  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.xiaomicamera.video-server.plist
+  ```
 
 总磁盘占用仍包含原文件和压缩副本；处理期间额外需要一份源文件快照及正在生成的压缩文件。正常完成或取消会清理快照，成功发布会删除该录像被替换的旧播放副本。异常断电可能留下临时文件，暂不自动清理已删除原录像对应的副本。
 
@@ -73,7 +80,7 @@ Mac 必须开机、联网、保持唤醒并连接 Tailscale。录像服务在安
 服务已启用下载版和诊断日志。以后修改代码需重启后生效；请在没有下载或压缩任务时执行：
 
 ```sh
-launchctl kickstart -k gui/501/com.xiaomicamera.video-server
+launchctl kickstart -k gui/$(id -u)/com.xiaomicamera.video-server
 ```
 
 ## 下载诊断日志
