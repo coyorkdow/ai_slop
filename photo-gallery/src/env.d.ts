@@ -6,6 +6,12 @@ declare module 'virtual:photos' {
     dir: string;
     image: ImageMetadata;
     /** 该文件夹 photos.json 里这张照片的条目 */
-    meta: { title?: string; description?: string; hidden?: boolean };
+    meta: {
+      title?: string;
+      description?: string;
+      hidden?: boolean;
+      /** 英文页面用的标题和说明，没写时回退到上面的中文 */
+      en?: { title?: string; description?: string };
+    };
   }[];
 }

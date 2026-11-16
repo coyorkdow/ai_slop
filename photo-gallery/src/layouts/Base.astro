@@ -1,27 +1,47 @@
 ---
+import { getRelativeLocaleUrl } from 'astro:i18n';
 import { SITE } from '../config';
+import { LANGS, LOCALES, getLang, getMessages } from '../i18n';
 
 interface Props {
   title?: string;
 }
 
 const { title } = Astro.props;
-const pageTitle = title ? `${title} · ${SITE.title}` : SITE.title;
+const lang = getLang(Astro.currentLocale);
+const t = getMessages(lang);
+const pageTitle = title ? `${title} · ${t.site.title}` : t.site.title;
 ---
 
 <!doctype html>
-<html lang="zh-CN">
+<html lang={LOCALES[lang].htmlLang}>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content={SITE.description} />
+    <meta name="description" content={t.site.description} />
     <meta name="color-scheme" content="dark" />
     <title>{pageTitle}</title>
+    {/* 告诉搜索引擎这个页面的其他语言版本 */}
+    {LANGS.map((l) => (
+      <link rel="alternate" hreflang={LOCALES[l].htmlLang} href={new URL(getRelativeLocaleUrl(l), Astro.site)} />
+    ))}
   </head>
   <body>
     <header class="site-header">
-      <a href="/" class="site-title">{SITE.title}</a>
-      <p class="site-desc">{SITE.description}</p>
+      <nav class="lang-switch" aria-label={t.langSwitch}>
+        {LANGS.map((l) => (
+          <a
+            href={getRelativeLocaleUrl(l)}
+            hreflang={LOCALES[l].htmlLang}
+            lang={LOCALES[l].htmlLang}
+            aria-current={l === lang ? 'page' : undefined}
+          >
+            {getMessages(l).langLabel}
+          </a>
+        ))}
+      </nav>
+      <a href={getRelativeLocaleUrl(lang)} class="site-title">{t.site.title}</a>
+      <p class="site-desc">{t.site.description}</p>
     </header>
     <main>
       <slot />
@@ -45,7 +65,25 @@ const pageTitle = title ? `${title} · ${SITE.title}` : SITE.title;
   a { color: inherit; }
   /* 页边距随窗口变宽：手机约 12px，宽屏最多 48px */
   main { padding: 0 clamp(12px, 3vw, 48px); }
-  .site-header { padding: 40px 16px 28px; text-align: center; }
+  .site-header { position: relative; padding: 40px 16px 28px; text-align: center; }
+  /* 右上角的语言切换：当前语言高亮，另一种语言可点击 */
+  .lang-switch {
+    position: absolute;
+    top: 14px;
+    right: clamp(12px, 3vw, 48px);
+    display: flex;
+    gap: 2px;
+    font-size: 0.8rem;
+  }
+  .lang-switch a {
+    padding: 4px 8px;
+    border-radius: 4px;
+    color: var(--muted);
+    text-decoration: none;
+    transition: color 0.2s, background 0.2s;
+  }
+  .lang-switch a:hover { color: var(--fg); background: rgba(255, 255, 255, 0.08); }
+  .lang-switch a[aria-current='page'] { color: var(--fg); pointer-events: none; }
   .site-title { font-size: 1.6rem; font-weight: 600; letter-spacing: 0.08em; text-decoration: none; }
   .site-desc { margin: 8px 0 0; color: var(--muted); font-size: 0.9rem; }
   .site-footer { padding: 40px 16px; text-align: center; color: var(--muted); font-size: 0.8rem; }

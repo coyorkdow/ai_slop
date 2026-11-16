@@ -1,7 +1,8 @@
 ---
 import type { ImageMetadata } from 'astro';
 import { Image, getImage } from 'astro:assets';
-import { formatDate, type Photo } from '../lib/photos';
+import { formatDate, getPhotoText, type Photo } from '../lib/photos';
+import { getLang } from '../i18n';
 
 interface Props {
   photo: Photo;
@@ -20,7 +21,8 @@ const largeWidth = Math.round(Math.min(width, (LARGE_LONG_EDGE * width) / Math.m
 const largeHeight = Math.round((height * largeWidth) / width);
 const large = await getImage({ src: photo.image, width: largeWidth, format: 'webp', quality: LARGE_QUALITY });
 
-const alt = photo.title ?? photo.file;
+const { title, description } = getPhotoText(photo, getLang(Astro.currentLocale));
+const alt = title ?? photo.file;
 const date = formatDate(photo.date);
 const exifLine = [photo.exif.focalLength, photo.exif.aperture, photo.exif.shutter, photo.exif.iso]
   .filter(Boolean)
@@ -46,8 +48,8 @@ const exifLine = [photo.exif.focalLength, photo.exif.aperture, photo.exif.shutte
   />
   {/* 灯箱底部抽屉展开后的内容：标题和说明，没写标题时用文件名 */}
   <div class="pswp-note-content" hidden>
-    <h2>{photo.title ?? photo.file.replace(/\.[^.]+$/, '')}</h2>
-    {photo.description && <p>{photo.description}</p>}
+    <h2>{title ?? photo.file.replace(/\.[^.]+$/, '')}</h2>
+    {description && <p>{description}</p>}
   </div>
   {/* 灯箱底部：拍摄信息 */}
   <div class="pswp-caption-content" hidden>

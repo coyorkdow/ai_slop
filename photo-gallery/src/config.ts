@@ -1,5 +1,4 @@
+// 站点标题和描述在 src/i18n/<语言>.json 里，每种语言各一份
 export const SITE = {
-  title: '我的照片',
-  description: '挑选的一些照片',
   author: 'coyorkdow',
 };

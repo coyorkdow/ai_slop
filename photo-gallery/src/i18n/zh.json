@@ -1,0 +1,17 @@
+{
+  "langLabel": "中文",
+  "langSwitch": "切换语言",
+  "site": {
+    "title": "我的照片",
+    "description": "挑选的一些照片"
+  },
+  "lightbox": {
+    "close": "关闭 (Esc)",
+    "zoom": "缩放 (Z)",
+    "prev": "上一张 (←)",
+    "next": "下一张 (→)",
+    "fullscreen": "全屏 (F)",
+    "error": "图片加载失败",
+    "counterSep": " / "
+  }
+}

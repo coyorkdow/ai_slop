@@ -1,0 +1,17 @@
+{
+  "langLabel": "EN",
+  "langSwitch": "Change language",
+  "site": {
+    "title": "My Photos",
+    "description": "A few selected photographs"
+  },
+  "lightbox": {
+    "close": "Close (Esc)",
+    "zoom": "Zoom (Z)",
+    "prev": "Previous (←)",
+    "next": "Next (→)",
+    "fullscreen": "Fullscreen (F)",
+    "error": "The image could not be loaded",
+    "counterSep": " / "
+  }
+}

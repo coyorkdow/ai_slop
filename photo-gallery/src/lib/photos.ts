@@ -4,12 +4,21 @@ import exifr from 'exifr';
 import type { ImageMetadata } from 'astro';
 // 照片来自 .env 里 PHOTOS_DIR 指定的一个或多个文件夹，见 photos-plugin.mjs
 import { photos as photoFiles } from 'virtual:photos';
+import { DEFAULT_LANG, type Lang } from '../i18n';
+
+interface PhotoText {
+  title?: string;
+  description?: string;
+}
 
 export interface Photo {
   file: string;
   image: ImageMetadata;
+  /** 默认语言（中文）的标题和说明 */
   title?: string;
   description?: string;
+  /** 其他语言的标题和说明，来自 photos.json 里对应语言的字段，例如 "en": { "title": ... } */
+  translations: Partial<Record<Lang, PhotoText>>;
   date?: Date;
   exif: {
     camera?: string;
@@ -75,6 +84,7 @@ async function loadPhotos(): Promise<Photo[]> {
         image,
         title: info.title,
         description: info.description,
+        translations: { en: info.en },
         date: exif?.DateTimeOriginal instanceof Date ? exif.DateTimeOriginal : undefined,
         exif: {
           camera: formatCamera(exif?.Make, exif?.Model),
@@ -93,6 +103,15 @@ async function loadPhotos(): Promise<Photo[]> {
   return photos
     .filter((p): p is Photo => p !== undefined)
     .sort((a, b) => (b.date?.getTime() ?? 0) - (a.date?.getTime() ?? 0));
+}
+
+/** 某种语言下的标题和说明，没有翻译的字段回退到默认语言 */
+export function getPhotoText(photo: Photo, lang: Lang): PhotoText {
+  const tr = lang === DEFAULT_LANG ? undefined : photo.translations[lang];
+  return {
+    title: tr?.title ?? photo.title,
+    description: tr?.description ?? photo.description,
+  };
 }
 
 export function formatDate(date?: Date) {

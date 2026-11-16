@@ -16,6 +16,12 @@ const photosDirs = (env.PHOTOS_DIR || 'photos')
 export default defineConfig({
   // 部署到自定义域名后改成你的地址，例如 'https://photos.example.com'
   site: 'https://youtao-photo-gallery.pages.dev',
+  // 中文页面在根目录 /，英文在 /en/。语言列表要和 src/i18n/index.ts 保持一致
+  i18n: {
+    locales: ['zh', 'en'],
+    defaultLocale: 'zh',
+    routing: { prefixDefaultLocale: false },
+  },
   // 开发工具栏固定在页面底部中间，会挡住灯箱的底部栏
   devToolbar: { enabled: false },
   image: {
