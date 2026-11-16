@@ -1,0 +1,81 @@
+---
+import type { ImageMetadata } from 'astro';
+import { Image, getImage } from 'astro:assets';
+import { formatDate, type Photo } from '../lib/photos';
+
+interface Props {
+  photo: Photo;
+  eager?: boolean;
+}
+
+const { photo, eager = false } = Astro.props;
+// 直接读 photo.image.width 会让 Astro 认为原图被引用，从而把 10MB 原图也复制进 dist。
+// 通过 clone 读取尺寸则不会触发这个标记。
+const { width, height } = (photo.image as ImageMetadata & { clone?: ImageMetadata }).clone ?? photo.image;
+
+// 灯箱里看的大图：长边最多 LARGE_LONG_EDGE px，WebP
+const LARGE_LONG_EDGE = 4000;
+const LARGE_QUALITY = 90;
+const largeWidth = Math.round(Math.min(width, (LARGE_LONG_EDGE * width) / Math.max(width, height)));
+const largeHeight = Math.round((height * largeWidth) / width);
+const large = await getImage({ src: photo.image, width: largeWidth, format: 'webp', quality: LARGE_QUALITY });
+
+const alt = photo.title ?? photo.file;
+const date = formatDate(photo.date);
+const exifLine = [photo.exif.focalLength, photo.exif.aperture, photo.exif.shutter, photo.exif.iso]
+  .filter(Boolean)
+  .join(' · ');
+---
+
+<a
+  class="photo"
+  href={large.src}
+  data-pswp-width={largeWidth}
+  data-pswp-height={largeHeight}
+  style={`--ar: ${width / height}`}
+>
+  <Image
+    src={photo.image}
+    width={800}
+    widths={[400, 800, 1200]}
+    sizes="(max-width: 640px) 60vw, 450px"
+    format="webp"
+    quality={80}
+    alt={alt}
+    loading={eager ? 'eager' : 'lazy'}
+  />
+  {/* 灯箱底部抽屉展开后的内容：标题和说明，没写标题时用文件名 */}
+  <div class="pswp-note-content" hidden>
+    <h2>{photo.title ?? photo.file.replace(/\.[^.]+$/, '')}</h2>
+    {photo.description && <p>{photo.description}</p>}
+  </div>
+  {/* 灯箱底部：拍摄信息 */}
+  <div class="pswp-caption-content" hidden>
+    <p>{[date, photo.exif.camera, photo.exif.lens].filter(Boolean).join(' · ')}</p>
+    {exifLine && <p>{exifLine}</p>}
+  </div>
+</a>
+
+<style>
+  .photo {
+    /* 固定行高，宽度按宽高比；超宽的全景图最多占满一行，多出部分裁掉 */
+    flex: none;
+    height: var(--row-height);
+    width: calc(var(--ar) * var(--row-height));
+    max-width: 100%;
+    display: block;
+    overflow: hidden;
+    background: #1c1c1c;
+  }
+  .photo :global(img) {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: opacity 0.2s, transform 0.4s;
+  }
+  .photo:hover :global(img) {
+    opacity: 0.9;
+    transform: scale(1.015);
+  }
+</style>
